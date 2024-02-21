@@ -990,14 +990,18 @@ except mlflow.exceptions.MlflowException as e:
 
 # COMMAND ----------
 
-logged_model = 'runs:/b9888a366a2a491295d74b3d8fa0a263/model'
+# the name of the model in the registry
+registry_model_name = "Overfill Test"
 
-# Load model as a PyFuncModel.
-loaded_model = mlflow.pyfunc.load_model(logged_model)
+# get the latest version of the model in staging and load it as a spark_udf.
+# MLflow easily produces a Spark user defined function (UDF).  This bridges the gap between Python environments and applying models at scale using Spark.
+model = mlflow.pyfunc.load_model(model_uri=f"models:/{registry_model_name}/staging")
+
+# COMMAND ----------
 
 # Predict on a Pandas DataFrame.
 import pandas as pd
-results = loaded_model.predict(X_valid)
+results = model.predict(X_valid)
 results
 
 # COMMAND ----------
