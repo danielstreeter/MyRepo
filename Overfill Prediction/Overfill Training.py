@@ -10,7 +10,17 @@
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/utils
+# MAGIC %run ./_resources/ml-modeling-utils
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %run ./_resources/mlflow-utils
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %run ./_resources/overfill-utils
 
 # COMMAND ----------
 
@@ -59,207 +69,9 @@ start_date = '2023-01-01'
 now = datetime.now()
 end_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
-sdf = spark.sql(f"""
-/*  Title: JOB_APPLICATION_CANCELLATION_WORKED
-    Date: 1/2/2023
-    Author: Dan Streeter
-    Summary: 
-        In order to better plan overfills, we know the proportion of workers that have successfully worked jobs out of the ones that were still in a successful                applied status at the time of job start.  This logic comes from the data team Time to Fill Logic 
-    Ticket Information:
-    Dependencies:
-        BLUECREW.MYSQL_BLUECREW.TIME_SEGMENTS_ABSOLUTE
-        BLUECREW.MYSQL_BLUECREW.SCHEDULE_WORK_REQUESTS
-        BLUECREW.DM.DM_JOB_NEEDED_HISTORY
-        BLUECREW.DM.DM_JOBS
-        BLUECREW.DM.DM_CM_JOB_APPLIED_HISTORY
-        DM.DM_CM_HOURS_WORKED
-    Caveats and Notes:
-        This doesn't check the people who worked of the applicants.  It only checks total successful applicants and number successfully worked.
-    Modifications:
-
-*/
-
---create or replace table PERSONALIZATION.JOB_APPLICATION_CANCELLATION_WORKED as (
-WITH tmp_first_shift AS (
-    -- identify the first shift of a job
-    SELECT DISTINCT
-        tsa.JOB_ID,
-        FIRST_VALUE(s.SCHEDULE_ID) OVER (PARTITION BY s.WORK_REQUEST_ID ORDER BY s.CREATED_AT DESC) AS SCHEDULE_ID,
-        FIRST_VALUE(tsa.START_TIME) OVER (PARTITION BY tsa.JOB_ID ORDER BY tsa.START_TIME ASC) AS FIRST_SHIFT_START_TIME,
-        FIRST_VALUE(tsa.SEGMENT_INDEX) OVER (PARTITION BY tsa.JOB_ID ORDER BY tsa.START_TIME ASC) AS FIRST_SEGMENT
-    FROM BLUECREW.MYSQL_BLUECREW.TIME_SEGMENTS_ABSOLUTE tsa
-    LEFT JOIN BLUECREW.MYSQL_BLUECREW.SCHEDULE_WORK_REQUESTS s
-      ON tsa.JOB_ID = s.WORK_REQUEST_ID
-    WHERE tsa.ACTIVE = TRUE
-        -- add a shift injects shifts into previous jobs with a matching wage and job type
-        -- these retroactive shifts should not be included in time to fill calculations
-        AND tsa.CREATED_AT < to_TIMESTAMP(tsa.START_TIME)
-        --AND tsa._FIVETRAN_DELETED = FALSE
-        ), -- account for bug causing duplicate rows in TSA
-
-tmp_first_shift_full AS (
-    -- get all columns for first shift and job information
-        SELECT
-            fs.JOB_ID,
-            tsa.SEGMENT_INDEX,
-            j.POSITION_ID,
-            to_TIMESTAMP(tsa.START_TIME) AS START_TIME,
-            TIMESTAMPADD(HOUR, -(tsa.START_TIME_OFFSET/60), to_TIMESTAMP(tsa.START_TIME)) AS START_TIME_LOCAL,
-            to_TIMESTAMP(tsa.END_TIME) AS END_TIME,
-            TIMESTAMPADD(HOUR, -(tsa.END_TIME_OFFSET/60),to_TIMESTAMP(tsa.END_TIME)) AS END_TIME_LOCAL,
-            fs.SCHEDULE_ID,
-            j.JOB_CREATED_AT,
-            j.JOB_TYPE,
-            j.JOB_TITLE,
-            j.JOB_WAGE,
-            j.JOB_STATUS_ENUM,
-            j.JOB_STATUS,
-            j.JOB_OVERFILL,
-            j.JOB_CITY,
-            j.JOB_STATE,
-            j.COMPANY_ID,
-            j.INVITED_WORKER_COUNT,
-            j.JOB_NEEDED_ORIGINAL_COUNT,
-            COALESCE(nh.NEEDED, j.JOB_NEEDED_ORIGINAL_COUNT) AS NEEDED,
-            j.JOB_SHIFTS
-            /*
-            j.EXTERNAL_JOB_ID,
-            j.JOB_TEMPLATE_ID,
-            j.JOB_TEMPLATES_EXTERNAL_ID,
-            j.BLUESHIFT_REQUEST_ID,
-            j.POSITION_ID,
-            j.JOB_DESCRIPTION,
-            j.JOB_ADDRESS_ID,
-            j.JOB_SUPERVISOR_USER_ID,
-            j.JOB_POSTER_ID,
-            j.JOB_TYPE_ID,
-            j.JOB_START_DATE_TIME,
-            j.JOB_END_DATE_TIME,
-            j.JOB_START_DATE_TIME_LOCAL,
-            j.JOB_END_DATE_TIME_LOCAL,
-            j.JOB_TIMEZONE,
-            j.UPDATED_AT,
-            j.JOB_NEEDED_LAST_COUNT,
-            j.JOB_BATCH_SIZE,
-            j.JOB_DAYS,
-            j.JOB_SHIFTS,
-            j.JOB_REASON_CODE,
-            j.JOB_REASON_TEXT,
-            j.JOB_ADDRESS,
-            j.JOB_ADDRESS_LINE_TWO,
-            j.JOB_ZIPCODE,
-            j.JOB_ADDRESS_LATITUDE,
-            j.JOB_ADDRESS_LONGITUDE
-             */
-        FROM tmp_first_shift fs
-        LEFT JOIN BLUECREW.MYSQL_BLUECREW.TIME_SEGMENTS_ABSOLUTE tsa
-            ON tsa.JOB_ID = fs.JOB_ID
-            AND tsa.START_TIME = fs.FIRST_SHIFT_START_TIME
-            AND tsa.SEGMENT_INDEX = fs.FIRST_SEGMENT
-            AND tsa.ACTIVE = TRUE
-            --AND tsa._FIVETRAN_DELETED = FALSE -- account for duplicate rows bug
-        LEFT JOIN BLUECREW.DM.DM_JOB_NEEDED_HISTORY nh
-            ON nh.JOB_ID = fs.JOB_ID
-            AND to_TIMESTAMP(START_TIME) BETWEEN START_DATE AND END_DATE
-        INNER JOIN BLUECREW.DM.DM_JOBS j
-            ON j.JOB_ID = fs.JOB_ID
---                 AND JOB_STATUS_ENUM < 6 -- active jobs only
-        WHERE YEAR(to_TIMESTAMP(START_TIME)) >= 2020
-            AND to_TIMESTAMP(START_TIME) <= DATEADD(DAY, 28, CURRENT_DATE())
-            AND (j.INVITED_WORKER_COUNT IS NULL OR j.INVITED_WORKER_COUNT < COALESCE(nh.NEEDED, j.JOB_NEEDED_ORIGINAL_COUNT))
-        ),
-        tmp_sign_ups AS (
-    -- Successful applications as of first shift start time
-    SELECT
-        fs.JOB_ID,
-        jah.USER_ID,
-        jah.APPLIED_STATUS_START_DATE AS SIGN_UP_TIME,
-        DENSE_RANK() OVER (PARTITION BY jah.JOB_ID ORDER BY jah.APPLIED_STATUS_START_DATE ASC, USER_ID) AS SIGN_UP_ORDER
-    FROM tmp_first_shift_full fs
-    LEFT JOIN BLUECREW.DM.DM_CM_JOB_APPLIED_HISTORY jah
-        ON fs.JOB_ID = jah.JOB_ID
-        AND fs.START_TIME >= jah.APPLIED_STATUS_START_DATE
-        AND fs.START_TIME < jah.END_DATE
-        AND APPLIED_STATUS_ENUM = 0 -- successful sign up only
-    ),
-
-tmp_agg_sign_ups AS (
-    -- Count of successful sign ups
-    SELECT
-        JOB_ID,
-        COUNT(USER_ID) AS TOTAL_SUCCESSFUL_SIGN_UPS
-    FROM tmp_sign_ups su
-    GROUP BY JOB_ID),
-
-tmp_first_shift_sign_up_count AS (
-    -- Join sign-up counts
-    SELECT
-        fs.JOB_ID,
-        fs.POSITION_ID,
-        fs.SEGMENT_INDEX,
-        fs.START_TIME,
-        fs.START_TIME_LOCAL,
-        fs.END_TIME,
-        fs.END_TIME_LOCAL,
-        fs.SCHEDULE_ID,
-        fs.JOB_CREATED_AT,
-        fs.JOB_TYPE,
-        fs.JOB_TITLE,
-    --             fs.JOB_DESCRIPTION,
-        fs.JOB_NEEDED_ORIGINAL_COUNT,
-        fs.JOB_WAGE,
-        fs.JOB_STATUS_ENUM,
-        fs.JOB_STATUS,
-        fs.JOB_OVERFILL,
-        fs.JOB_CITY,
-        fs.JOB_STATE,
-        fs.COMPANY_ID,
-        fs.INVITED_WORKER_COUNT,
-        fs.NEEDED,
-        fs.JOB_SHIFTS,
-        asu.TOTAL_SUCCESSFUL_SIGN_UPS,
-        CASE
-            -- no sign up so leave null
-            WHEN asu.TOTAL_SUCCESSFUL_SIGN_UPS IS NULL THEN 0
-            -- less than 100% fill, use max sign up count
-            WHEN fs.NEEDED >= asu.TOTAL_SUCCESSFUL_SIGN_UPS THEN asu.TOTAL_SUCCESSFUL_SIGN_UPS
-            -- more then 100% fill, use needed count
-            WHEN fs.NEEDED < asu.TOTAL_SUCCESSFUL_SIGN_UPS THEN fs.NEEDED
-            END AS SIGN_UP_JOIN_COUNT
-    FROM tmp_first_shift_full fs
-    LEFT JOIN tmp_agg_sign_ups asu
-        ON fs.JOB_ID = asu.JOB_ID),
-
-    tmp_successfully_worked as (
-    SELECT job_id, segment_index, count(user_id) as successfully_worked
-    FROM bluecrew.dm.dm_cm_hours_worked
-    where (job_id, user_id) in (select job_id, user_id from tmp_sign_ups)
-    GROUP BY 1, 2
-    ),
-    jacw as (
-    select ssc.*, coalesce(sw.successfully_worked,0) as SUCCESSFULLY_WORKED
-    from tmp_first_shift_sign_up_count ssc
-    Left join tmp_successfully_worked sw
-    on ssc.job_id = sw.job_id and ssc.segment_index = sw.segment_index
-)
-
-select jacw.*, c.COMPANY_ORIGIN, DATEDIFF(DAY, JOB_CREATED_AT, START_TIME) as POSTING_LEAD_TIME_DAYS
-from jacw
-left join bluecrew.dm.dm_companies c
-on jacw.company_id = c.company_id
-where 1=1
--- and job_type = 'Event Staff' 
-and START_TIME >= '{start_date}'
-and JOB_CREATED_AT >='{start_date}'
-and START_TIME_LOCAL < '{end_date}'
-""")
-
-
-
-sdf = sdf.withColumn("JOB_ID",  sdf["JOB_ID"].cast('int'))
+sdf = jobs_query(start_date,end_date)
 display(sdf)
-print((sdf.count(), len(sdf.columns)))
-# sdf
+
 
 # COMMAND ----------
 
@@ -484,117 +296,13 @@ with mlflow.start_run():
 
 # COMMAND ----------
 
-# Initialize the MLflow client
-client = mlflow.tracking.MlflowClient()
-
-# Fetch all available experiments
-experiments = client.search_experiments()
-
-# Sort the experiments by their last update time in descending order
-sorted_experiments = sorted(experiments, key=lambda x: x.last_update_time, reverse=True)
-
-# Retrieve the most recently updated experiment
-latest_experiment = sorted_experiments[0]
-
-# Output the name of the latest experiment
-print(f"The most recently updated experiment is named '{latest_experiment.name}'.")
-
-# Note: If you're specifically looking for the experiment related to AutoML for base model creation,
-# ensure that 'latest_experiment' corresponds to that experiment.
-
-# COMMAND ----------
-
-# Initialize the Databricks utilities to programmatically fetch the username
-username = dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
-
-# Retrieve the name of the latest experiment; assumed to have been set in earlier steps
-experiment_name = latest_experiment.name
-
-# Define the model name for the registry, specific to our use-case of Churn Prediction for a Bank
+# Define the model name for the registry
 registry_model_name = "Overfill Test"
 
-# Fetch the experiment details using its name
-experiment_details = client.get_experiment_by_name(experiment_name)
-
-# Search for runs within the experiment and sort them by validation F1 score in descending order
-sorted_runs = mlflow.search_runs(experiment_details.experiment_id).sort_values("metrics.r2", ascending=False)
-
-# Get the run ID of the best model based on the highest validation F1 score
-best_run_id = sorted_runs.loc[0, "run_id"]
-
-best_run_id
-# Note: The variable `best_run_id` now contains the run ID of the best model in the specified experiment
-
-# COMMAND ----------
-
-# Initialize the model's URI using the best run ID obtained from previous steps
-model_uri = f"runs:/{best_run_id}/model"
-
-# Register the model in MLflow's model registry under the specified name
-try:
-    model_details = mlflow.register_model(model_uri=model_uri, name=registry_model_name)
-    print(f"Successfully registered model '{registry_model_name}' with URI '{model_uri}'.")
-except mlflow.exceptions.MlflowException as e:
-    print(f"Failed to register model '{registry_model_name}': {str(e)}")
-
-model_details
-# Note: The variable `model_details` now contains details about the registered model
-
-# COMMAND ----------
-
-# # Update the metadata of an already registered model
-# try:
-#     client.update_registered_model(
-#         name=model_details.name,
-#         description="This model predicts the show up rate for successful applications."
-#     )
-#     print(f"Successfully updated the description for the registered model '{model_details.name}'.")
-# except mlflow.exceptions.MlflowException as e:
-#     print(f"Failed to update the registered model '{model_details.name}': {str(e)}")
-
-# # Update the metadata for a specific version of the model
-# try:
-#     client.update_model_version(
-#         name=model_details.name,
-#         version=model_details.version,
-#         description="This is a scikit-learn random forest based model."
-#     )
-#     print(f"Successfully updated the description for version {model_details.version} of the model '{model_details.name}'.")
-# except mlflow.exceptions.MlflowException as e:
-#     print(f"Failed to update version {model_details.version} of the model '{model_details.name}': {str(e)}")
-
-# # Note: The `model_details` variable is assumed to contain details about the registered model and its version
-
-# COMMAND ----------
-
-# Transition the model version to the 'Staging' stage in the model registry
-try:
-    client.transition_model_version_stage(
-        name=model_details.name,
-        version=model_details.version,
-        stage="Staging",
-        archive_existing_versions=True  # Archives any existing versions in the 'Staging' stage
-    )
-    print(f"Successfully transitioned version {model_details.version} of the model '{model_details.name}' to 'Staging'.")
-except mlflow.exceptions.MlflowException as e:
-    print(f"Failed to transition version {model_details.version} of the model '{model_details.name}' to 'Staging': {str(e)}")
-
-
-# COMMAND ----------
-
-# # the name of the model in the registry
-# registry_model_name = "Overfill Test"
-
-# # get the latest version of the model in staging and load it as a spark_udf.
-# # MLflow easily produces a Spark user defined function (UDF).  This bridges the gap between Python environments and applying models at scale using Spark.
-# model = mlflow.pyfunc.load_model(model_uri=f"models:/{registry_model_name}/staging")
-
-# COMMAND ----------
-
-# # Predict on a Pandas DataFrame.
-# import pandas as pd
-# results = model.predict(X_valid)
-# results
+latest_experiment = find_latest_experiment()
+best_run_id = find_best_run_id(latest_experiment, "metrics.r2")
+model_details = register_run_as_model(registry_model_name, best_run_id)
+update_model_stage(model_details, 'Staging')
 
 # COMMAND ----------
 
@@ -606,6 +314,28 @@ except mlflow.exceptions.MlflowException as e:
 # Create a feature importance plot
 feature_importance = FeatureImportance(my_pipeline)
 feature_importance.plot(top_n_features=25)
+
+# COMMAND ----------
+
+def build_prediction_intervals(y_test, preds_test, y_train, preds_train, interval: float =.7, include_residuals: bool=True):
+  """
+  Using residuals from the model predictions, determines the prediction interval that would capture a given percent of all correct predictions
+
+  Parameters:
+  - y_test: actual test target variable values, should have a primary key as the index to join with X_test
+  - preds_test: predicted test target variable values
+  - y_train: actual training target variable values, should have a primary key as the index to join with X_train
+  - preds_train: predicted training target variable values
+  - interval: percent of residuals to capture
+  - include_residuals: whether or not to include columns with the residuals for each prediction
+
+  Returns: 
+  prediction_interval_df: pandas df with the index of y_test, y_train, the upper and lower predictions for each, and a column denoting which dataset it came from
+  """
+  
+
+
+  return prediction_interval_df
 
 # COMMAND ----------
 

@@ -355,6 +355,7 @@ class FeatureImportance:
 # COMMAND ----------
 
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
+import numpy as np
 
 # Evaluate metrics
 def eval_metrics(actual, pred):
@@ -424,18 +425,3 @@ def convert_spark_to_pandas(spark_df: DataFrame) -> pd.DataFrame:
         if isinstance(field.dataType, DecimalType):
             spark_df = spark_df.withColumn(field.name, col(field.name).cast("float"))
     return spark_df.toPandas()
-
-# COMMAND ----------
-
-# Setting up database access
-sfUser = dbutils.secrets.get(scope="my_secrets", key="snowflake-user")
-SFPassword = dbutils.secrets.get(scope="my_secrets", key="snowflake-password")
- 
-options = {
-  "sfUrl": "vha09841.snowflakecomputing.com",
-  "sfUser": sfUser,
-  "SFPassword": SFPassword,
-  "sfDataBase": "BLUECREW",
-  "sfSchema": "PERSONALIZATION",
-  "sfWarehouse": "COMPUTE_WH"
-}
