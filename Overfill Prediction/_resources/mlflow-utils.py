@@ -26,9 +26,7 @@ def find_latest_experiment() -> mlflow.entities.experiment.Experiment:
   # Output the name of the latest experiment
   print(f"The most recently updated experiment is named '{latest_experiment.name}'.")
   return sorted_experiments[0]
-
-
-    
+  
 
 # COMMAND ----------
 

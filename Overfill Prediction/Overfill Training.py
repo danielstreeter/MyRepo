@@ -241,7 +241,7 @@ preprocessor = ColumnTransformer(
 
 # COMMAND ----------
 
-# DBTITLE 1,This will be updated once the previous code runs
+# DBTITLE 1,This will be updated once the previous code can be incorporated
 # Parameters from prior hyperparameter tuning
 best_params = {'max_depth': 8.0, 'n_estimators': 150.0}
 
@@ -560,7 +560,7 @@ df.createOrReplaceTempView('data')
 
 # COMMAND ----------
 
-df.write.format("snowflake").options(**options).mode("overwrite").option("dbtable", 'OVERFILL').save()
+df.write.format("snowflake").options(**options).mode("overwrite").option("dbtable", 'OVERFILL_TRAINING').save()
 
 
 # COMMAND ----------
