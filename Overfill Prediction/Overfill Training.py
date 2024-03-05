@@ -317,25 +317,25 @@ feature_importance.plot(top_n_features=25)
 
 # COMMAND ----------
 
-def build_prediction_intervals(y_test, preds_test, y_train, preds_train, interval: float =.7, include_residuals: bool=True):
-  """
-  Using residuals from the model predictions, determines the prediction interval that would capture a given percent of all correct predictions
+# def build_prediction_intervals(y_test, preds_test, y_train, preds_train, interval: float =.7, include_residuals: bool=True):
+#   """
+#   Using residuals from the model predictions, determines the prediction interval that would capture a given percent of all correct predictions
 
-  Parameters:
-  - y_test: actual test target variable values, should have a primary key as the index to join with X_test
-  - preds_test: predicted test target variable values
-  - y_train: actual training target variable values, should have a primary key as the index to join with X_train
-  - preds_train: predicted training target variable values
-  - interval: percent of residuals to capture
-  - include_residuals: whether or not to include columns with the residuals for each prediction
+#   Parameters:
+#   - y_test: actual test target variable values, should have a primary key as the index to join with X_test
+#   - preds_test: predicted test target variable values
+#   - y_train: actual training target variable values, should have a primary key as the index to join with X_train
+#   - preds_train: predicted training target variable values
+#   - interval: percent of residuals to capture
+#   - include_residuals: whether or not to include columns with the residuals for each prediction
 
-  Returns: 
-  prediction_interval_df: pandas df with the index of y_test, y_train, the upper and lower predictions for each, and a column denoting which dataset it came from
-  """
+#   Returns: 
+#   prediction_interval_df: pandas df with the index of y_test, y_train, the upper and lower predictions for each, and a column denoting which dataset it came from
+#   """
   
 
 
-  return prediction_interval_df
+#   return prediction_interval_df
 
 # COMMAND ----------
 
@@ -555,6 +555,7 @@ plt.show()
 
 # COMMAND ----------
 
+overfill_added['as_of_date']=datetime.now()
 df = spark.createDataFrame(overfill_added)
 df.createOrReplaceTempView('data')
 
@@ -562,6 +563,11 @@ df.createOrReplaceTempView('data')
 
 df.write.format("snowflake").options(**options).mode("overwrite").option("dbtable", 'OVERFILL_TRAINING').save()
 
+
+# COMMAND ----------
+
+
+write_spark_table_to_databricks_schema(df, 'overfill_training_data', 'bluecrew.ml', mode = 'append')
 
 # COMMAND ----------
 

@@ -14,6 +14,7 @@ options = {
 
 # COMMAND ----------
 
+from pyspark.sql import DataFrame
 def jobs_query(start_date: str, end_date: str) -> DataFrame:
     """
     Runs SQL query to pull job-based show up rate data
