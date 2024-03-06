@@ -217,7 +217,6 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
     where 1=1
     -- and job_type = 'Event Staff' 
     and START_TIME >= '{start_date}'
-    and JOB_CREATED_AT >='{start_date}'
     and START_TIME_LOCAL < '{end_date}'
     """)
 
