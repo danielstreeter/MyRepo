@@ -65,9 +65,10 @@ from mlflow.models.signature import infer_signature
 
 # COMMAND ----------
 
-start_date = '2024-01-01'
+start_date = '2023-12-01'
 now = datetime.now()
 end_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+end_date = '2024-02-14'
 
 sdf = jobs_query(start_date,end_date)
 display(sdf)
@@ -76,8 +77,9 @@ display(sdf)
 # COMMAND ----------
 
 sdf = sdf.filter((sdf.NEEDED >0)&(sdf.COMPANY_ORIGIN == 'BC')&(sdf.JOB_NEEDED_ORIGINAL_COUNT>0)&(sdf.POSTING_LEAD_TIME_DAYS>0))
-display(sdf)
 
+sdf = sdf.withColumn('Work', F.when(sdf.target_var == 'Worked', 1).otherwise(0))
+display(sdf)
 
 # COMMAND ----------
 
@@ -88,9 +90,20 @@ model_feature_lookups = [
       #This is a feature lookup that demonstrates how to use point in time based lookups for training sets
       FeatureLookup(
         table_name='feature_store.dev.jobs_data',
-        feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED',"ELIGIBLE_USERS", "ACTIVE_USERS_7_DAYS", "COUNTY", "ELIGIBLE_CMS_1_MILE", "ELIGIBLE_CMS_5_MILE","ELIGIBLE_CMS_10_MILE", 'ELIGIBLE_CMS_15_MILE', "ACTIVE_CMS_1_MILE", "ACTIVE_CMS_5_MILE", "ACTIVE_CMS_10_MILE", "ACTIVE_CMS_15_MILE", "JOB_TYPE_TITLE_COUNT", "TOTAL_JOB_COUNT", "TOTAL_CMS_REQUIRED", "CM_COUNT_RATIO"],
+        feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED', "COUNTY"],
+        # feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED',"ELIGIBLE_USERS", "ACTIVE_USERS_7_DAYS", "COUNTY", "ELIGIBLE_CMS_1_MILE", "ELIGIBLE_CMS_5_MILE","ELIGIBLE_CMS_10_MILE", 'ELIGIBLE_CMS_15_MILE', "ACTIVE_CMS_1_MILE", "ACTIVE_CMS_5_MILE", "ACTIVE_CMS_10_MILE", "ACTIVE_CMS_15_MILE", "JOB_TYPE_TITLE_COUNT", "TOTAL_JOB_COUNT", "TOTAL_CMS_REQUIRED", "CM_COUNT_RATIO"],
         lookup_key="JOB_ID",
-        timestamp_lookup_key="JOB_CREATED_AT")
+        timestamp_lookup_key="min_successful_app_start"),
+      FeatureLookup(
+        table_name='feature_store.dev.user_hours_worked_calendar',
+        lookup_key="USER_ID",
+        feature_names=['JOBS_WORKED_TOTAL', 'JOBS_WORKED_LAST_30_DAYS', 'JOBS_WORKED_LAST_90_DAYS', 'SHIFTS_WORKED_TOTAL', 'SHIFTS_WORKED_LAST_7_DAYS', 'SHIFTS_WORKED_LAST_30_DAYS', 'SHIFTS_WORKED_LAST_90_DAYS', 'TOTAL_HOURS_WORKED_TOTAL', 'TOTAL_HOURS_WORKED_LAST_7_DAYS', 'TOTAL_HOURS_WORKED_LAST_30_DAYS', 'TOTAL_HOURS_WORKED_LAST_90_DAYS'],
+        timestamp_lookup_key="min_successful_app_start"),
+      FeatureLookup(
+        table_name='feature_store.dev.user_snc_ncns_calendar',
+        lookup_key="USER_ID",
+        feature_names=['NCNS_SHIFTS_TOTAL', 'NCNS_SHIFTS_LAST_30_DAYS', 'NCNS_SHIFTS_LAST_90_DAYS', 'NCNS_SHIFTS_LAST_365_DAYS', 'SNC_SHIFTS_TOTAL', 'SNC_SHIFTS_LAST_30_DAYS', 'SNC_SHIFTS_LAST_90_DAYS', 'SNC_SHIFTS_LAST_365_DAYS'],
+        timestamp_lookup_key="min_successful_app_start"),
 ]
 training_set = fe.create_training_set(
     df = sdf, # joining the original Dataset, with our FeatureLookupTable
@@ -101,6 +114,10 @@ training_set = fe.create_training_set(
 
 training_pd = training_set.load_df()
 display(training_pd)
+
+# COMMAND ----------
+
+sdf = sdf.withColumn('Work', F.when(sdf.target_var == 'Worked', 1).otherwise(0))
 
 # COMMAND ----------
 
@@ -119,10 +136,16 @@ print(list(df.columns))
 # COMMAND ----------
 
 # Defines the columns that correspond to a job and creates final dataset to split for training and testing.
-cols_to_drop = ['SUCCESSFULLY_WORKED', 'TOTAL_SUCCESSFUL_SIGN_UPS', 'JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'SIGN_UP_JOIN_COUNT', 'POSITION_ID', 'COMPANY_ID', 'COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'SCHEDULE_ID']
+cols_to_drop = ['JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'POSITION_ID', 'COMPANY_ID', 'SCHEDULE_ID', 'JOB_ID', 'target_var', 'application_status', 'successful_application_count', 'max_successful_app_start', 'min_successful_app_end', 'max_successful_app_end']
 df4 = df.drop(columns=cols_to_drop)
-df5 = df4.set_index('JOB_ID')
+df5 = df4.set_index('USER_ID')
 df5
+
+# COMMAND ----------
+
+df6 = spark.createDataFrame(df5)
+
+write_spark_table_to_databricks_schema(df6, 'overfill_individual_training_data', 'bluecrew.ml', mode = 'overwrite')
 
 # COMMAND ----------
 
@@ -242,7 +265,7 @@ preprocessor = ColumnTransformer(
 
 # DBTITLE 1,This will be updated once the previous code can be incorporated
 # Parameters from prior hyperparameter tuning
-best_params = {'max_depth': 8.0, 'n_estimators': 150.0}
+best_params = {'max_depth': 12.0, 'n_estimators': 200.0}
 
 # COMMAND ----------
 
@@ -295,13 +318,13 @@ with mlflow.start_run():
 
 # COMMAND ----------
 
-# Define the model name for the registry
-registry_model_name = "Overfill Test"
+# # Define the model name for the registry
+# registry_model_name = "Overfill Test"
 
-latest_experiment = find_latest_experiment()
-best_run_id = find_best_run_id(latest_experiment, "metrics.r2")
-model_details = register_run_as_model(registry_model_name, best_run_id)
-update_model_stage(model_details, 'Staging')
+# latest_experiment = find_latest_experiment()
+# best_run_id = find_best_run_id(latest_experiment, "metrics.r2")
+# model_details = register_run_as_model(registry_model_name, best_run_id)
+# update_model_stage(model_details, 'Staging')
 
 # COMMAND ----------
 
@@ -557,6 +580,7 @@ plt.show()
 overfill_added['as_of_date']=datetime.now()
 df = spark.createDataFrame(overfill_added)
 df.createOrReplaceTempView('data')
+
 
 # COMMAND ----------
 

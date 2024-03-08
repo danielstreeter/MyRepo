@@ -61,6 +61,8 @@ from pyspark.sql.functions import col
 from pyspark.sql.types import LongType, DecimalType, FloatType
 import mlflow
 from mlflow.models.signature import infer_signature
+mlflow.autolog()
+mlflow.set_registry_uri("databricks-uc")
 
 
 # COMMAND ----------
@@ -297,7 +299,7 @@ with mlflow.start_run():
 # COMMAND ----------
 
 # Define the model name for the registry
-registry_model_name = "Overfill Test"
+registry_model_name = "bluecrew.ml.Overfill_Test"
 
 latest_experiment = find_latest_experiment()
 best_run_id = find_best_run_id(latest_experiment, "metrics.r2")

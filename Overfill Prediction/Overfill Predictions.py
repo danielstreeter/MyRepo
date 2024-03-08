@@ -128,7 +128,7 @@ df2
 # COMMAND ----------
 
 # the name of the model in the registry
-registry_model_name = "Overfill Test"
+registry_model_name = "bluecrew.ml.Overfill_Test"
 
 # get the latest version of the model in staging and load it as a spark_udf.
 # MLflow easily produces a Spark user defined function (UDF).  This bridges the gap between Python environments and applying models at scale using Spark.

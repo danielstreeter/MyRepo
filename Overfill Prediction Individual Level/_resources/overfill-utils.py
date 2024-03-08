@@ -54,13 +54,13 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
                 FIRST_VALUE(s.SCHEDULE_ID) OVER (PARTITION BY s.WORK_REQUEST_ID ORDER BY s.CREATED_AT DESC) AS SCHEDULE_ID,
                 FIRST_VALUE(tsa.START_TIME) OVER (PARTITION BY tsa.JOB_ID ORDER BY tsa.START_TIME ASC) AS FIRST_SHIFT_START_TIME,
                 FIRST_VALUE(tsa.SEGMENT_INDEX) OVER (PARTITION BY tsa.JOB_ID ORDER BY tsa.START_TIME ASC) AS FIRST_SEGMENT
-            FROM BLUECREW.MYSQL_BLUECREW.TIME_SEGMENTS_ABSOLUTE tsa
-            LEFT JOIN BLUECREW.MYSQL_BLUECREW.SCHEDULE_WORK_REQUESTS s
+            FROM bc_foreign_mysql.bluecrew.time_segments_absolute tsa
+            LEFT JOIN bc_foreign_mysql.bluecrew.SCHEDULE_WORK_REQUESTS s
                 ON tsa.JOB_ID = s.WORK_REQUEST_ID
             WHERE tsa.ACTIVE = TRUE
                 -- add a shift injects shifts into previous jobs with a matching wage and job type
                 -- these retroactive shifts should not be included in time to fill calculations
-                AND tsa.CREATED_AT < to_TIMESTAMP(tsa.START_TIME)
+                AND tsa.CREATED_AT < CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP)
                 --AND tsa._FIVETRAN_DELETED = FALSE
                 ), -- account for bug causing duplicate rows in TSA
 
@@ -217,3 +217,8 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
 
     sdf = sdf.withColumn("JOB_ID",  sdf["JOB_ID"].cast('int')).withColumn("USER_ID",  sdf["USER_ID"].cast('int'))
     return sdf
+
+# COMMAND ----------
+
+a = spark.sql(""" SELECT DISTINCT to_timestamp(tsa.START_TIME) as start_converted FROM bc_foreign_mysql.bluecrew.time_segments_absolute tsa WHERE CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) > '2024-01-01 00:00:00.0' """)
+display(a)
