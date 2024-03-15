@@ -5,8 +5,9 @@
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC #Preprocessing
+# %pip install databricks-feature-engineering
+%pip install databricks-feature-engineering==0.2.1a1
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -53,8 +54,9 @@ from sklearn.decomposition import PCA
 from sklearn.utils.validation import check_is_fitted
 
 from databricks import feature_store
-from databricks.feature_store import feature_table, FeatureLookup
-from databricks.feature_engineering import FeatureEngineeringClient
+from databricks.feature_store import feature_table
+from databricks.feature_engineering import FeatureEngineeringClient, FeatureFunction, FeatureLookup
+
 from pyspark.sql.functions import to_date, current_timestamp
 import pyspark.sql.functions as F
 from pyspark.sql.functions import col
@@ -68,7 +70,7 @@ from mlflow.models.signature import infer_signature
 start_date = '2023-12-01'
 now = datetime.now()
 end_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-end_date = '2024-02-14'
+end_date = '2024-01-01'
 
 sdf = jobs_query(start_date,end_date)
 display(sdf)
@@ -87,23 +89,43 @@ display(sdf)
 # # For more info look here: https://docs.gcp.databricks.com/en/machine-learning/feature-store/time-series.html
 fe = FeatureEngineeringClient()
 model_feature_lookups = [
-      #This is a feature lookup that demonstrates how to use point in time based lookups for training sets
+      # FeatureLookup(
+      #   table_name='feature_store.dev.jobs_data',
+      #   feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED', "COUNTY"],
+      #   lookup_key="JOB_ID",
+      #   timestamp_lookup_key="min_successful_app_start"),
+      # FeatureLookup(
+      #   table_name='feature_store.dev.user_snc_ncns_calendar',
+      #   lookup_key="USER_ID",
+      #   feature_names=['NCNS_SHIFTS_TOTAL', 'NCNS_SHIFTS_LAST_30_DAYS', 'NCNS_SHIFTS_LAST_90_DAYS', 'NCNS_SHIFTS_LAST_365_DAYS', 'SNC_SHIFTS_TOTAL', 'SNC_SHIFTS_LAST_30_DAYS', 'SNC_SHIFTS_LAST_90_DAYS', 'SNC_SHIFTS_LAST_365_DAYS'],
+      #   timestamp_lookup_key="min_successful_app_start"),
+      # Lookup column `average_yearly_spend` and `country` from a table in UC by the input `user_id`.
       FeatureLookup(
-        table_name='feature_store.dev.jobs_data',
-        feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED', "COUNTY"],
-        # feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED',"ELIGIBLE_USERS", "ACTIVE_USERS_7_DAYS", "COUNTY", "ELIGIBLE_CMS_1_MILE", "ELIGIBLE_CMS_5_MILE","ELIGIBLE_CMS_10_MILE", 'ELIGIBLE_CMS_15_MILE', "ACTIVE_CMS_1_MILE", "ACTIVE_CMS_5_MILE", "ACTIVE_CMS_10_MILE", "ACTIVE_CMS_15_MILE", "JOB_TYPE_TITLE_COUNT", "TOTAL_JOB_COUNT", "TOTAL_CMS_REQUIRED", "CM_COUNT_RATIO"],
-        lookup_key="JOB_ID",
-        timestamp_lookup_key="min_successful_app_start"),
+        table_name='feature_store.dev.job_schedule_array',
+        lookup_key='JOB_ID',
+        timestamp_lookup_key="min_successful_app_start",
+        # feature_names=["JOB_ADDRESS_LATITUDE", "JOB_ADDRESS_LONGITUDE"]
+      ),
       FeatureLookup(
-        table_name='feature_store.dev.user_hours_worked_calendar',
+        table_name='feature_store.dev.user_schedule_array2',
         lookup_key="USER_ID",
-        feature_names=['JOBS_WORKED_TOTAL', 'JOBS_WORKED_LAST_30_DAYS', 'JOBS_WORKED_LAST_90_DAYS', 'SHIFTS_WORKED_TOTAL', 'SHIFTS_WORKED_LAST_7_DAYS', 'SHIFTS_WORKED_LAST_30_DAYS', 'SHIFTS_WORKED_LAST_90_DAYS', 'TOTAL_HOURS_WORKED_TOTAL', 'TOTAL_HOURS_WORKED_LAST_7_DAYS', 'TOTAL_HOURS_WORKED_LAST_30_DAYS', 'TOTAL_HOURS_WORKED_LAST_90_DAYS'],
-        timestamp_lookup_key="min_successful_app_start"),
+        timestamp_lookup_key="min_successful_app_start",
+        # feature_names=["JOB_ADDRESS_LATITUDE", "JOB_ADDRESS_LONGITUDE"]
+      ),
       FeatureLookup(
-        table_name='feature_store.dev.user_snc_ncns_calendar',
+        table_name='feature_store.dev.user_work_history',
         lookup_key="USER_ID",
-        feature_names=['NCNS_SHIFTS_TOTAL', 'NCNS_SHIFTS_LAST_30_DAYS', 'NCNS_SHIFTS_LAST_90_DAYS', 'NCNS_SHIFTS_LAST_365_DAYS', 'SNC_SHIFTS_TOTAL', 'SNC_SHIFTS_LAST_30_DAYS', 'SNC_SHIFTS_LAST_90_DAYS', 'SNC_SHIFTS_LAST_365_DAYS'],
-        timestamp_lookup_key="min_successful_app_start"),
+        timestamp_lookup_key="min_successful_app_start",
+        # feature_names=["JOB_ADDRESS_LATITUDE", "JOB_ADDRESS_LONGITUDE"]
+      ), 
+      # Calculate a new feature called `cosine_sim` - the cosine similarity between the user's work history and the current job.
+      # FeatureFunction(
+      #   udf_name='feature_store.dev.cosine_similarity',
+      #   output_name="cosine_sim",
+      #   # Bind the function parameter with input from other features or from request.
+      #   # The function calculates a - b.
+      #   input_bindings={"arr1":"job_schedule", "arr2": "running_schedule_array"},
+      # )
 ]
 training_set = fe.create_training_set(
     df = sdf, # joining the original Dataset, with our FeatureLookupTable
@@ -113,11 +135,86 @@ training_set = fe.create_training_set(
 )
 
 training_pd = training_set.load_df()
-display(training_pd)
+# display(training_pd2)
 
 # COMMAND ----------
 
-sdf = sdf.withColumn('Work', F.when(sdf.target_var == 'Worked', 1).otherwise(0))
+# # This looks up job-level features in feature store
+# # # For more info look here: https://docs.gcp.databricks.com/en/machine-learning/feature-store/time-series.html
+# fe = FeatureEngineeringClient()
+# model_feature_lookups = [
+#       #This is a feature lookup that demonstrates how to use point in time based lookups for training sets
+#       FeatureLookup(
+#         table_name='feature_store.dev.jobs_data',
+#         feature_names=['COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'WAGE_DELTA', 'SCHEDULE_NAME_UPDATED', "COUNTY"],
+#         lookup_key="JOB_ID",
+#         timestamp_lookup_key="min_successful_app_start"),
+#       FeatureLookup(
+#         table_name='feature_store.dev.user_hours_worked_calendar',
+#         lookup_key="USER_ID",
+#         feature_names=['JOBS_WORKED_TOTAL', 'JOBS_WORKED_LAST_30_DAYS', 'JOBS_WORKED_LAST_90_DAYS', 'SHIFTS_WORKED_TOTAL', 'SHIFTS_WORKED_LAST_7_DAYS', 'SHIFTS_WORKED_LAST_30_DAYS', 'SHIFTS_WORKED_LAST_90_DAYS', 'TOTAL_HOURS_WORKED_TOTAL', 'TOTAL_HOURS_WORKED_LAST_7_DAYS', 'TOTAL_HOURS_WORKED_LAST_30_DAYS', 'TOTAL_HOURS_WORKED_LAST_90_DAYS'],
+#         timestamp_lookup_key="min_successful_app_start"),
+#       FeatureLookup(
+#         table_name='feature_store.dev.user_snc_ncns_calendar',
+#         lookup_key="USER_ID",
+#         feature_names=['NCNS_SHIFTS_TOTAL', 'NCNS_SHIFTS_LAST_30_DAYS', 'NCNS_SHIFTS_LAST_90_DAYS', 'NCNS_SHIFTS_LAST_365_DAYS', 'SNC_SHIFTS_TOTAL', 'SNC_SHIFTS_LAST_30_DAYS', 'SNC_SHIFTS_LAST_90_DAYS', 'SNC_SHIFTS_LAST_365_DAYS'],
+#         timestamp_lookup_key="min_successful_app_start"),
+#       FeatureLookup(
+#         table_name='feature_store.dev.job_schedule_array',
+#         lookup_key='JOB_ID',
+#         timestamp_lookup_key="min_successful_app_start"
+#       ),
+#       FeatureLookup(
+#         table_name='feature_store.dev.user_schedule_array2',
+#         lookup_key="USER_ID",
+#         timestamp_lookup_key="min_successful_app_start"
+#       ),
+#       FeatureLookup(
+#         table_name='feature_store.dev.user_work_history',
+#         lookup_key="USER_ID",
+#         timestamp_lookup_key="min_successful_app_start"
+#       ), 
+#       # Calculate a new feature called `cosine_sim` - the cosine similarity between the user's work history and the current job.
+#       FeatureFunction(
+#         udf_name='feature_store.dev.cosine_similarity',
+#         output_name="cosine_sim",
+#         input_bindings={"arr1":"job_schedule", "arr2": "running_schedule_array"},
+#       )
+# ]
+# training_set = fe.create_training_set(
+#     df = sdf, # joining the original Dataset, with our FeatureLookupTable
+#     feature_lookups=model_feature_lookups,
+#     exclude_columns=[], # exclude columns as we don't want them as feature
+#     label='Work'
+# )
+
+# training_pd = training_set.load_df()
+# # display(training_pd)
+
+# COMMAND ----------
+
+# # This looks up job-level features in feature store
+# # # For more info look here: https://docs.gcp.databricks.com/en/machine-learning/feature-store/time-series.html
+# fe = FeatureEngineeringClient()
+# model_feature_lookups = [
+      
+#       FeatureLookup(
+#         table_name='feature_store.dev.user_work_history',
+#         lookup_key="USER_ID",
+#         timestamp_lookup_key="min_successful_app_start",
+#         # feature_names=["JOB_ADDRESS_LATITUDE", "JOB_ADDRESS_LONGITUDE"]
+#       ), 
+# ]
+# training_set2 = fe.create_training_set(
+#     df = sdf, # joining the original Dataset, with our FeatureLookupTable
+#     feature_lookups=model_feature_lookups,
+#     exclude_columns=[], # exclude id columns as we don't want them as feature
+#     label='Work'
+# )
+
+# training_pd2 = training_set2.load_df()
+# training_pd2.explain()
+# display(training_pd2)
 
 # COMMAND ----------
 
@@ -136,16 +233,21 @@ print(list(df.columns))
 # COMMAND ----------
 
 # Defines the columns that correspond to a job and creates final dataset to split for training and testing.
-cols_to_drop = ['JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'POSITION_ID', 'COMPANY_ID', 'SCHEDULE_ID', 'JOB_ID', 'target_var', 'application_status', 'successful_application_count', 'max_successful_app_start', 'min_successful_app_end', 'max_successful_app_end']
-df4 = df.drop(columns=cols_to_drop)
+cols_to_drop = ['JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'POSITION_ID', 'COMPANY_ID', 'SCHEDULE_ID', 'JOB_ID', 'target_var', 'application_status', 'successful_application_count', 'max_successful_app_start', 'min_successful_app_end', 'max_successful_app_end', 'job_schedule', 'running_schedule_array']
+# df2 = df[(df['target_var']!='Early Cancel')&(df['JOB_STATUS']!='Cancelled')]
+df2 = df.copy()
+df4 = df2.drop(columns=cols_to_drop)
 df5 = df4.set_index('USER_ID')
-df5
+df5['Past_Work']= df5['cosine_sim'].apply(lambda x: 1 if x==x else 0)
+
+df5 = df5[df5['apply_lead_time_hours']!=0]
+df5.info()
 
 # COMMAND ----------
 
-df6 = spark.createDataFrame(df5)
+# df6 = spark.createDataFrame(df5)
 
-write_spark_table_to_databricks_schema(df6, 'overfill_individual_training_data', 'bluecrew.ml', mode = 'overwrite')
+# write_spark_table_to_databricks_schema(df6, 'overfill_individual_training_data', 'bluecrew.ml', mode = 'overwrite')
 
 # COMMAND ----------
 
@@ -277,7 +379,7 @@ mlflow.autolog()
 max_depth= int(best_params['max_depth'])
 n_estimators=int(best_params['n_estimators'])
 # Creates initial random forest model for training
-model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=0)
+model = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, random_state=0)
 
 # Bundle preprocessing and modeling code in a pipeline
 my_pipeline = Pipeline(steps=[('preprocessor', preprocessor),
@@ -288,13 +390,13 @@ with mlflow.start_run():
   my_pipeline.fit(X_train, y_train)
 
   # Preprocessing of validation data, get predictions
-  preds = my_pipeline.predict(X_valid)
+  preds = my_pipeline.predict_proba(X_valid)[:,1]
 
 
   # Evaluate the model
   #Training Performance:
   print("Training Performance:")
-  (rmse, mae, r2, mape) = eval_metrics(y_train, my_pipeline.predict(X_train))
+  (rmse, mae, r2, mape) = eval_metrics(y_train, my_pipeline.predict_proba(X_train)[:,1])
 
   # Print out model metrics
   print("  RMSE: %s" % rmse)

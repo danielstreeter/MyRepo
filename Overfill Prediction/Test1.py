@@ -45,7 +45,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.tree import plot_tree
 from sklearn import metrics
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
+
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
@@ -58,15 +58,18 @@ from databricks.feature_engineering import FeatureEngineeringClient
 from pyspark.sql.functions import to_date, current_timestamp
 import pyspark.sql.functions as F
 from pyspark.sql.functions import col
+from pyspark.sql.types import LongType, DecimalType, FloatType
 import mlflow
 from mlflow.models.signature import infer_signature
+mlflow.autolog()
+mlflow.set_registry_uri("databricks-uc")
 
 
 # COMMAND ----------
 
+start_date = '2023-01-01'
 now = datetime.now()
-start_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-end_date = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+end_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
 sdf = jobs_query(start_date,end_date)
 display(sdf)
@@ -74,9 +77,14 @@ display(sdf)
 
 # COMMAND ----------
 
-sdf = sdf.filter((sdf.NEEDED >0)).withColumn('Work', sdf.SUCCESSFULLY_WORKED / sdf.TOTAL_SUCCESSFUL_SIGN_UPS) 
+sdf = sdf.filter((sdf.NEEDED >=3)&(sdf.TOTAL_SUCCESSFUL_SIGN_UPS>=3)&(sdf.COMPANY_ORIGIN == 'BC')&(sdf.JOB_NEEDED_ORIGINAL_COUNT>=5)&(sdf.TOTAL_SUCCESSFUL_SIGN_UPS>=sdf.SUCCESSFULLY_WORKED)&(sdf.POSTING_LEAD_TIME_DAYS>0))
+sdf = sdf.withColumn('Work', sdf.SUCCESSFULLY_WORKED / sdf.TOTAL_SUCCESSFUL_SIGN_UPS) 
 display(sdf)
 
+
+# COMMAND ----------
+
+print((sdf.count(), len(sdf.columns)))
 
 # COMMAND ----------
 
@@ -84,12 +92,6 @@ display(sdf)
 # # For more info look here: https://docs.gcp.databricks.com/en/machine-learning/feature-store/time-series.html
 fe = FeatureEngineeringClient()
 model_feature_lookups = [
-      #This is a basic feature lookup that doesn't have a timestamp key
-    #   FeatureLookup(
-    #       table_name='feature_store.dev.calendar',
-    #       lookup_key="START_TIME"
-    #   )
-    #   ,
       #This is a feature lookup that demonstrates how to use point in time based lookups for training sets
       FeatureLookup(
         table_name='feature_store.dev.jobs_data',
@@ -105,62 +107,241 @@ training_set = fe.create_training_set(
 )
 
 training_pd = training_set.load_df()
-# display(training_pd)
+display(training_pd)
 
 # COMMAND ----------
 
-# Converts the Spark df + features to a pandas DataFrame and turns boolean columns into integers
-# convert this to do the type casting first and then use toPandas()?
 df = optimize_spark(training_pd).toPandas()
 
 bool_cols = [cname for cname in df.columns if df[cname].dtype == 'bool']
 for col in bool_cols:
   df[col] = df[col].astype(int)
 print(list(df.columns))
-df.set_index('JOB_ID', inplace = True)
-
-# COMMAND ----------
-
-input_cols = ['JOB_TYPE', 'JOB_STATE', 'COMPANY_ORIGIN', 'SCHEDULE_NAME_UPDATED', 'JOB_NEEDED_ORIGINAL_COUNT', 'JOB_WAGE', 'JOB_SHIFTS', 'POSTING_LEAD_TIME_DAYS', 'WAGE_DELTA', 'ELIGIBLE_USERS', 'ACTIVE_USERS_7_DAYS', 'ELIGIBLE_CMS_1_MILE', 'ELIGIBLE_CMS_5_MILE', 'ELIGIBLE_CMS_10_MILE', 'ELIGIBLE_CMS_15_MILE', 'ACTIVE_CMS_1_MILE', 'ACTIVE_CMS_5_MILE', 'ACTIVE_CMS_10_MILE', 'ACTIVE_CMS_15_MILE', 'JOB_TYPE_TITLE_COUNT', 'TOTAL_JOB_COUNT', 'TOTAL_CMS_REQUIRED', 'CM_COUNT_RATIO']
-df2 = df[input_cols]
-df2
-
-# COMMAND ----------
-
-import mlflow.pyfunc
-
-model_version_uri = "models:/{model_name}/1".format(model_name=MODEL_NAME)
-
-print("Loading registered model version from URI: '{model_uri}'".format(model_uri=model_version_uri))
-model_version_1 = mlflow.pyfunc.load_model(model_version_uri)
-
-model_champion_uri = "models:/{model_name}@Champion".format(model_name=MODEL_NAME)
-
-print("Loading registered model version from URI: '{model_uri}'".format(model_uri=model_champion_uri))
-champion_model = mlflow.pyfunc.load_model(model_champion_uri)
-
-# COMMAND ----------
-
-# the name of the model in the registry
-registry_model_name = "bluecrew.ml.Overfill_Test"
-
-# get the latest version of the model in staging and load it as a spark_udf.
-# MLflow easily produces a Spark user defined function (UDF).  This bridges the gap between Python environments and applying models at scale using Spark.
-model = mlflow.pyfunc.load_model(model_uri=f"models:/{registry_model_name}/1")
-
-
-# COMMAND ----------
-
-df2['Work'] = model.predict(df2)
-
-# COMMAND ----------
-
-df2
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Need to add the post processing outputs to get to new predictions for Streamlit
+# MAGIC ## Testing and training preparation
+
+# COMMAND ----------
+
+# Defines the columns that correspond to a job and creates final dataset to split for training and testing.
+cols_to_drop = ['SUCCESSFULLY_WORKED', 'TOTAL_SUCCESSFUL_SIGN_UPS', 'JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'SIGN_UP_JOIN_COUNT', 'POSITION_ID', 'COMPANY_ID', 'COUNTY_JOB_TYPE_TITLE_AVG_WAGE', 'SCHEDULE_ID']
+df4 = df.drop(columns=cols_to_drop)
+df5 = df4.set_index('JOB_ID')
+df5
+
+# COMMAND ----------
+
+# Splits DF into train, test, and prediction dataframes
+y = df5['Work']
+X = df5.drop(columns=['Work'])
+
+# Uses these for the training and testing
+X_train_full, X_valid_full, y_train, y_valid = train_test_split(X, y, train_size=0.8, test_size=0.2,random_state=0)
+
+# Checks for missing values and determines shape of X_train
+cols_with_missing = [col for col in X_train_full.columns if X_train_full[col].isnull().any()]
+
+print("Columns with missing values :", cols_with_missing)
+print("X_train_full shape :", X_train_full.shape)
+print("X_valid_full shape :", X_valid_full.shape)
+
+# COMMAND ----------
+
+# IDs categorical and numeric columns for use in modeling and for splitting into proper pipeline.
+categorical_cols = [cname for cname in X_train_full.columns if X_train_full[cname].nunique() < 30 and X_train_full[cname].dtype in ["object", "string"]]
+numerical_cols = [cname for cname in X_train_full.columns if X_train_full[cname].dtype in ['int32', 'int64', 'float64', 'float32','decimal']]
+
+print('categorical columns :', categorical_cols)
+print('numerical columns :', numerical_cols)
+
+# COMMAND ----------
+
+# IDs new columns subset
+my_cols = categorical_cols + numerical_cols
+X_train = X_train_full[my_cols].copy()
+X_valid = X_valid_full[my_cols].copy()
+print(my_cols)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Model Pipeline
+
+# COMMAND ----------
+
+# Preprocessing for numerical data
+numerical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='constant')),
+    ('scaler', StandardScaler())
+])
+
+# Preprocessing for categorical data
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore'))
+])
+
+# Bundle preprocessing for numerical and categorical data
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numerical_transformer, numerical_cols),
+        ('cat', categorical_transformer, categorical_cols)
+    ])
+
+# COMMAND ----------
+
+# DBTITLE 1,This is what we would use hyperopt to solve once we work out the shared cluster runtime issue
+# from sklearn.pipeline import Pipeline
+# from sklearn.ensemble import RandomForestRegressor
+# from hyperopt import hp, fmin, tpe, STATUS_OK, SparkTrials
+# from hyperopt.pyll.base import scope
+# import shap
+# import mlflow
+# import numpy as np
+
+# # Define your preprocessor here (as you did before)
+# # preprocessor = ...
+
+# # Include the model as a step in the pipeline
+# my_pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+#                               ('model', RandomForestRegressor())])
+
+# def train_model(params):
+#     # Update the parameter names to reflect the pipeline structure
+#     params = {'model__' + key: params[key] for key in params}
+    
+#     # Fit the pipeline with the training data
+#     my_pipeline.set_params(**params).fit(X_train, y_train)
+
+#     # SHAP values
+#     # booster = my_pipeline.named_steps['model']
+#     # shap_values = shap.TreeExplainer(booster).shap_values(X_train, y=y_train)
+#     # shap.summary_plot(shap_values, X_train, feature_names=display_cols, plot_size=(14,6), max_display=10, show=False)
+#     # plt.savefig("summary_plot.png", bbox_inches="tight") 
+#     # plt.close()
+#     # mlflow.log_artifact("summary_plot.png")
+
+#     # Predict and evaluate
+#     preds = my_pipeline.predict(X_valid)
+#     (rmse, mae, r2) = eval_metrics(y_valid, preds)
+#     # mlflow.log_metric("rmse", rmse)
+#     # mlflow.log_metric("r2", r2)
+#     # mlflow.log_metric("mae", mae)
+#     return {'status': STATUS_OK, 'loss': rmse}
+
+# # Define your search space
+# search_space = {
+#     'max_depth': scope.int(hp.quniform('max_depth', 3, 15, 1)),
+#     'n_estimators': scope.int(hp.quniform('n_estimators', 25, 150, 25))
+# }
+
+# # mlflow.autolog()
+
+# # with mlflow.start_run():
+# # Hyperopt optimization
+# spark_trials = SparkTrials(parallelism=4)
+# best_params = fmin(fn=train_model, space=search_space, algo=tpe.suggest, max_evals=50, trials=spark_trials, rstate=np.random.default_rng(seed=42))
+
+
+# COMMAND ----------
+
+# DBTITLE 1,This will be updated once the previous code can be incorporated
+# Parameters from prior hyperparameter tuning
+best_params = {'max_depth': 8.0, 'n_estimators': 150.0}
+
+# COMMAND ----------
+
+import mlflow
+
+mlflow.autolog()
+
+
+max_depth= int(best_params['max_depth'])
+n_estimators=int(best_params['n_estimators'])
+# Creates initial random forest model for training
+model = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth, random_state=0)
+
+# Bundle preprocessing and modeling code in a pipeline
+my_pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                              ('model', model)
+                             ])
+with mlflow.start_run():
+  # Preprocessing of training data, fit model 
+  my_pipeline.fit(X_train, y_train)
+
+  # Preprocessing of validation data, get predictions
+  preds = my_pipeline.predict(X_valid)
+
+
+  # Evaluate the model
+  #Training Performance:
+  print("Training Performance:")
+  (rmse, mae, r2, mape) = eval_metrics(y_train, my_pipeline.predict(X_train))
+
+  # Print out model metrics
+  print("  RMSE: %s" % rmse)
+  print("  MAE: %s" % mae)
+  print("  R2: %s" % r2)
+  print("  MAPE: %s" % mape)
+
+  #Test Performance:
+  print("Test Performance:")
+  (rmse, mae, r2, mape) = eval_metrics(y_valid, preds)
+
+  # Print out model metrics
+  print("  RMSE: %s" % rmse)
+  print("  MAE: %s" % mae)
+  print("  R2: %s" % r2)
+  print("  MAPE: %s" % mape)
+  mlflow.log_metric("rmse", rmse)
+  mlflow.log_metric("r2", r2)
+  mlflow.log_metric("mae", mae)
+
+
+# COMMAND ----------
+
+# Define the model name for the registry
+registry_model_name = "bluecrew.ml.Overfill_Test"
+
+latest_experiment = find_latest_experiment()
+best_run_id = find_best_run_id(latest_experiment, "metrics.r2")
+model_details = register_run_as_model(registry_model_name, best_run_id)
+update_model_stage(model_details, 'Staging')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Model Evaluation and Explanation
+
+# COMMAND ----------
+
+# Create a feature importance plot
+feature_importance = FeatureImportance(my_pipeline)
+feature_importance.plot(top_n_features=25)
+
+# COMMAND ----------
+
+# def build_prediction_intervals(y_test, preds_test, y_train, preds_train, interval: float =.7, include_residuals: bool=True):
+#   """
+#   Using residuals from the model predictions, determines the prediction interval that would capture a given percent of all correct predictions
+
+#   Parameters:
+#   - y_test: actual test target variable values, should have a primary key as the index to join with X_test
+#   - preds_test: predicted test target variable values
+#   - y_train: actual training target variable values, should have a primary key as the index to join with X_train
+#   - preds_train: predicted training target variable values
+#   - interval: percent of residuals to capture
+#   - include_residuals: whether or not to include columns with the residuals for each prediction
+
+#   Returns: 
+#   prediction_interval_df: pandas df with the index of y_test, y_train, the upper and lower predictions for each, and a column denoting which dataset it came from
+#   """
+  
+
+
+#   return prediction_interval_df
 
 # COMMAND ----------
 
@@ -195,25 +376,8 @@ print(b)
 
 # COMMAND ----------
 
-# Builds DataFrame with predicted and actual values for future set.  Don't have actual values for these.
-d = y_future.reset_index()
-d = d.rename(columns={'Work':'Actual_Show_Up_Rate'})
-
-d['Predicted_Show_Up_Rate'] = my_pipeline.predict(future_jobs)
-d['Actual_Show_Up_Rate'] = 0
-d['Delta'] = 0
-d['Signed_Delta'] = 0
-#signed delta from test dataset
-d['lowq'] = a['Signed_Delta'].quantile((1-interval)/2)
-d['highq'] = a['Signed_Delta'].quantile(1-(1-interval)/2)
-d['Dataset']="Future"
-
-d
-
-# COMMAND ----------
-
 # Merges job data to look at characteristics associated with predictions
-c = pd.concat([a,b,d])
+c = pd.concat([a,b])
 
 # creates the upper and lower bounds of the prediction interval
 c['lower_guess']=(c['Predicted_Show_Up_Rate'] + c['lowq']).clip(lower = .01) #can't have negative numbers
@@ -397,13 +561,19 @@ plt.show()
 
 # COMMAND ----------
 
+overfill_added['as_of_date']=datetime.now()
 df = spark.createDataFrame(overfill_added)
 df.createOrReplaceTempView('data')
 
 # COMMAND ----------
 
-df.write.format("snowflake").options(**options).mode("overwrite").option("dbtable", 'OVERFILL_PREDICTIONS').save()
+df.write.format("snowflake").options(**options).mode("overwrite").option("dbtable", 'OVERFILL_TRAINING').save()
 
+
+# COMMAND ----------
+
+
+write_spark_table_to_databricks_schema(df, 'overfill_training_data', 'bluecrew.ml', mode = 'append')
 
 # COMMAND ----------
 

@@ -220,5 +220,5 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
 
 # COMMAND ----------
 
-a = spark.sql(""" SELECT DISTINCT to_timestamp(tsa.START_TIME) as start_converted FROM bc_foreign_mysql.bluecrew.time_segments_absolute tsa WHERE CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) > '2024-01-01 00:00:00.0' """)
-display(a)
+# a = spark.sql(""" SELECT DISTINCT to_timestamp(tsa.START_TIME) as start_converted FROM bc_foreign_mysql.bluecrew.time_segments_absolute tsa WHERE CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) > '2024-01-01 00:00:00.0' """)
+# display(a)
