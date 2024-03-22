@@ -70,10 +70,10 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
                     fs.JOB_ID,
                     tsa.SEGMENT_INDEX,
                     j.POSITION_ID,
-                    to_TIMESTAMP(tsa.START_TIME) AS START_TIME,
-                    TIMESTAMPADD(HOUR, -(tsa.START_TIME_OFFSET/60), to_TIMESTAMP(tsa.START_TIME)) AS START_TIME_LOCAL,
-                    to_TIMESTAMP(tsa.END_TIME) AS END_TIME,
-                    TIMESTAMPADD(HOUR, -(tsa.END_TIME_OFFSET/60),to_TIMESTAMP(tsa.END_TIME)) AS END_TIME_LOCAL,
+                    CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) AS START_TIME,
+                    TIMESTAMPADD(HOUR, -(tsa.START_TIME_OFFSET/60), CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP)) AS START_TIME_LOCAL,
+                    CAST(FROM_UNIXTIME(tsa.END_TIME) AS TIMESTAMP) AS END_TIME,
+                    TIMESTAMPADD(HOUR, -(tsa.END_TIME_OFFSET/60),CAST(FROM_UNIXTIME(tsa.END_TIME) AS TIMESTAMP)) AS END_TIME_LOCAL,
                     fs.SCHEDULE_ID,
                     j.JOB_CREATED_AT,
                     j.JOB_TYPE,
@@ -119,26 +119,26 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
                     j.JOB_ADDRESS_LONGITUDE
                     */
                 FROM tmp_first_shift fs
-                LEFT JOIN BLUECREW.MYSQL_BLUECREW.TIME_SEGMENTS_ABSOLUTE tsa
+                LEFT JOIN bc_foreign_mysql.bluecrew.TIME_SEGMENTS_ABSOLUTE tsa
                     ON tsa.JOB_ID = fs.JOB_ID
                     AND tsa.START_TIME = fs.FIRST_SHIFT_START_TIME
                     AND tsa.SEGMENT_INDEX = fs.FIRST_SEGMENT
                     AND tsa.ACTIVE = TRUE
                     --AND tsa._FIVETRAN_DELETED = FALSE -- account for duplicate rows bug
-                LEFT JOIN BLUECREW.DM.DM_JOB_NEEDED_HISTORY nh
+                LEFT JOIN bc_foreign_snowflake.DM.DM_JOB_NEEDED_HISTORY nh
                     ON nh.JOB_ID = fs.JOB_ID
-                    AND to_TIMESTAMP(START_TIME) BETWEEN START_DATE AND END_DATE
-                INNER JOIN BLUECREW.DM.DM_JOBS j
+                    AND CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) BETWEEN START_DATE AND END_DATE
+                INNER JOIN bc_foreign_snowflake.DM.DM_JOBS j
                     ON j.JOB_ID = fs.JOB_ID
         --                 AND JOB_STATUS_ENUM < 6 -- active jobs only
-                WHERE YEAR(to_TIMESTAMP(START_TIME)) >= 2020
-                    AND to_TIMESTAMP(START_TIME) <= DATEADD(DAY, 28, CURRENT_DATE())
+                WHERE YEAR(CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP)) >= 2020
+                    AND CAST(FROM_UNIXTIME(tsa.START_TIME) AS TIMESTAMP) <= DATEADD(DAY, 28, CURRENT_DATE())
                     AND (j.INVITED_WORKER_COUNT IS NULL OR j.INVITED_WORKER_COUNT < COALESCE(nh.NEEDED, j.JOB_NEEDED_ORIGINAL_COUNT))
                 )
                 ,
                 successful_applications as (
                     SELECT user_id, job_id, min(jah.APPLIED_STATUS_START_DATE) as min_successful_app_start, max(jah.APPLIED_STATUS_START_DATE) as max_successful_app_start, min(jah.END_DATE) as min_successful_app_end, max(jah.END_DATE) as max_successful_app_end, count(applied_status_enum) as successful_application_count
-                    FROM BLUECREW.DM.DM_CM_JOB_APPLIED_HISTORY jah 
+                    FROM bc_foreign_snowflake.DM.DM_CM_JOB_APPLIED_HISTORY jah 
                     where APPLIED_STATUS_ENUM = 0
                     group by 1,2
                 )
@@ -203,10 +203,12 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
                 LEFT JOIN tmp_first_shift_full fs
                 ON fs.JOB_ID = w.JOB_ID
                 )
-    select jacw.*, c.COMPANY_ORIGIN, DATEDIFF(DAY, jacw.JOB_CREATED_AT, jacw.JOB_START_TIME) as POSTING_LEAD_TIME_DAYS
+    select jacw.*, c.COMPANY_ORIGIN, DATEDIFF(DAY, jacw.JOB_CREATED_AT, jacw.JOB_START_TIME) as POSTING_LEAD_TIME_DAYS, u.user_address_latitude, u.user_address_longitude
     from jacw
-    left join bluecrew.dm.dm_companies c
+    left join bc_foreign_snowflake.dm.dm_companies c
     on jacw.company_id = c.company_id
+    left join bc_foreign_snowflake.dm.dm_users u
+    on jacw.user_id = u.user_id
     where 1=1
     -- and job_type = 'Event Staff' 
     and jacw.JOB_START_TIME >= '{start_date}'
@@ -215,7 +217,7 @@ def jobs_query(start_date: str, end_date: str) -> DataFrame:
 
 
 
-    sdf = sdf.withColumn("JOB_ID",  sdf["JOB_ID"].cast('int')).withColumn("USER_ID",  sdf["USER_ID"].cast('int'))
+    sdf = sdf.withColumn("JOB_ID",  sdf["JOB_ID"].cast('string')).withColumn("USER_ID",  sdf["USER_ID"].cast('string'))
     return sdf
 
 # COMMAND ----------
