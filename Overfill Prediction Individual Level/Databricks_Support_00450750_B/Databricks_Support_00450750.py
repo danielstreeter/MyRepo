@@ -11,17 +11,17 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/ml-modeling-utils
+# MAGIC %run ./resources/ml-modeling-utils_B
 # MAGIC
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/mlflow-utils
+# MAGIC %run ./resources/mlflow-utils_B
 # MAGIC
 
 # COMMAND ----------
 
-# MAGIC %run ./_resources/overfill-utils
+# MAGIC %run ./resources/overfill-utils_B
 
 # COMMAND ----------
 

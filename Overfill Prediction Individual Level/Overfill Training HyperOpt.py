@@ -1,7 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Individual Level Model
-# MAGIC This notebook loads snowflake data, cleans it, and develops a model to predict job-level show up rates (worked first shift/successful applications at job start) that will help with setting an overfill rate.  This model is at the job level and doesn't consider the attricutes of CMs that have applied.  Since it only considers successful applications at the time of job start, all cancellations prior to job start are excluded.
+# MAGIC # Individual Level Model Description
+# MAGIC This notebook runs util notebooks, queries the foreign catalog to obtain individual level application event data, cleans it, and develops a model to predict individual-level show up rates.  It answers the question, "if someone applied, what was the outcome of that application?" by first checking to see if they worked the first shift of the applied to job.  If not, it checks when their latest cancellation occured and categorizes them into early cancellation, SNC, and NCNS.  This model will supplement the job-level overfill prediction model and apply its predictions to the applicant population.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Library installs and util runs
 
 # COMMAND ----------
 
@@ -93,6 +98,11 @@ from mlflow.tracking import MlflowClient
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Training Label Query
+
+# COMMAND ----------
+
 start_date = '2023-01-01'
 now = datetime.now()
 end_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -104,10 +114,23 @@ sdf = jobs_query(start_date,end_date)
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Filtering and cleaning
+
+# COMMAND ----------
+
+#currently only trust training data for BC accounts where the account was posted in advance of starting and requiring more than 0 people.
 sdf = sdf.filter((sdf.NEEDED >0)&(sdf.COMPANY_ORIGIN == 'BC')&(sdf.JOB_NEEDED_ORIGINAL_COUNT>0)&(sdf.POSTING_LEAD_TIME_DAYS>0))
 
+#changes the categorical target variable into a binary one-versus-rest status for worked vs. all other cancellation taypes and NCNS
 sdf = sdf.withColumn('Work', F.when(sdf.target_var == 'Worked', 1).otherwise(0))
-# display(sdf)
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Foreign Catalog to Delta Temp Table
+# MAGIC ##### We have found problems with querying the foreign catalog and then looking up features.  It seems to take 10-20x as long compared to writing a temp Delta table, rereading it, and then performing the feature lookup.
 
 # COMMAND ----------
 
@@ -151,6 +174,11 @@ sdf = spark.read.format("delta").table('bluecrew.ml.overfill_training_labels')
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Feature Store Lookup
+
+# COMMAND ----------
+
 # This looks up job-level features in feature store
 # # For more info look here: https://docs.gcp.databricks.com/en/machine-learning/feature-store/time-series.html
 fe = FeatureEngineeringClient()
@@ -162,7 +190,7 @@ model_feature_lookups = [
         lookup_key="JOB_ID",
         timestamp_lookup_key="min_successful_app_start"),
       FeatureLookup(
-        table_name='feature_store.prod.user_hours_worked_calendar',
+        table_name='feature_store.dev.user_hours_worked_calendar2',
         lookup_key="USER_ID",
         timestamp_lookup_key="min_successful_app_start"),
       FeatureLookup(
@@ -216,6 +244,11 @@ training_pd = training_set.load_df()
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Pandas DataFrame Creation 
+
+# COMMAND ----------
+
 df = optimize_spark(training_pd).toPandas()
 
 bool_cols = [cname for cname in df.columns if df[cname].dtype == 'bool']
@@ -226,16 +259,18 @@ print(list(df.columns))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Testing and training preparation
+# MAGIC # Testing and training preparation
+# MAGIC ##### This has to happen in the feature lookup to be part of the fe.log_model pipeline and use the predict_batch function.  Currently, these are things I am testing in model and will clean up once I find which sets of features to use and which calculated fields are relevant.
 
 # COMMAND ----------
 
 # Defines the columns that correspond to a job and creates final dataset to split for training and testing.
 cols_to_drop = ['JOB_STATUS_ENUM', 'JOB_STATUS', 'JOB_OVERFILL', 'INVITED_WORKER_COUNT', 'SEGMENT_INDEX', 'NEEDED', 'POSITION_ID', 'COMPANY_ID', 'SCHEDULE_ID', 'JOB_ID','USER_ID', 'JOB_CITY','COUNTY','target_var', 'application_status', 'successful_application_count', 'max_successful_app_start', 'min_successful_app_end', 'max_successful_app_end', 'job_schedule', 'running_schedule_array', 'JOB_TITLE', 'JOB_STATE']
 # df2 = df[(df['target_var']!='Early Cancel')&(df['JOB_STATUS']!='Cancelled')]
-df2 = df[(df['JOB_STATUS']!='Cancelled')]
+# df2 = df[(df['JOB_STATUS']!='Cancelled')]
+df2 = df[(df['target_var']!='Early Cancel')&(df['JOB_STATUS']!='Cancelled')]
 # df2 = df.copy()
-df2['Wage_diff_7']=df2['AVG_WAGE_LAST_7_DAYS']-df2['JOB_WAGE']
+df2['Wage_diff']=df2['JOB_WAGE']/df2['avg_wage_total']
 df2['Unique_ID']= np.arange(df2.shape[0])
 df3 = df2[['Unique_ID', 'USER_ID', 'JOB_ID']]
 df4 = df2.drop(columns=cols_to_drop)
@@ -247,84 +282,8 @@ df5.info()
 
 # COMMAND ----------
 
-# df6 = spark.createDataFrame(df5)
-
-# write_spark_table_to_databricks_schema(df6, 'overfill_individual_training_data', 'bluecrew.ml', mode = 'overwrite')
-
-# COMMAND ----------
-
-from mlflow.pyfunc import PythonModel
-
-class ModelWrapper(PythonModel):
-    def __init__(self, model):
-        self.model = model
-
-    # def load_context(self, context):
-    #     from joblib import load
-
-    #     self.model = load(context.artifacts["model_path"])
-
-    def predict(self, model_input, params=None):
-        params = params or {"predict_method": "predict"}
-        predict_method = params.get("predict_method")
-
-        if predict_method == "predict":
-            return self.model.predict(model_input)
-        elif predict_method == "predict_proba":
-            return self.model.predict_proba(model_input)
-        elif predict_method == "predict_log_proba":
-            return self.model.predict_log_proba(model_input)
-        else:
-            raise ValueError(f"The prediction method '{predict_method}' is not supported.")
-
-# COMMAND ----------
-
-# import mlflow
-# import mlflow.pyfunc
-# from mlflow.tracking import MlflowClient
-# from mlflow.models.signature import infer_signature
- 
-# #probility function
-# input_example_prob = [{"x": 1.0}]
-# def custom_predict_proba_wrapper(model):
-#     def predict_proba(input_data):
-#         input_data = np.array(input_data)
-#         # Use the model's predict_proba method to get class probabilities
-#         return model.predict_proba(input_data)
-#     return predict_proba
- 
-# #classifier input example to log in schema    
-# input_features = x_train.iloc[:1]  
-# model_predictions = rf_model.predict(input_example)
- 
-# # Infer signature
-# signature = infer_signature(input_example, model_predictions)
- 
-# # mlflow.sklearn.autolog(log_input_examples=True,silent=True)
-# with mlflow.start_run(run_name="RandomForestRun") as run:
-   
-#  # Create a pipeline with the classifier
-#     model = Pipeline([
-#         ("job_match_supervised", rf_model),
-#     ])
-#     # Fit the model to your training data
-#     model.fit(x_train, y_train_resampled)
- 
- 
-#     # Log the model using MLflow
-#     mlflow.sklearn.log_model(model, "model", signature=signature, input_example=input_features)
- 
-#     # Create the custom predict_proba wrapper function
-#     custom_predict_proba = custom_predict_proba_wrapper(model)
- 
-#     # Log the custom predict_proba wrapper function
-#     mlflow.pyfunc.log_model("custom_predict_proba", python_model=custom_predict_proba,input_example=input_example)
-   
-#     mlflow.log_metric("accuracy", rf_accuracy)
-#     mlflow.log_metric("precision", rf_precision)
-#     mlflow.log_metric("recall", rf_recall)
-#     mlflow.log_metric("f1_score", rf_f1)
-#     mlflow.log_metric("roc_auc", rf_roc_auc)
+# MAGIC %md
+# MAGIC # Model Training
 
 # COMMAND ----------
 
@@ -428,7 +387,7 @@ with mlflow.start_run(run_name='Hyperparameter Optimization') as parent_run:
         fn=objective,
         space=space,  
         algo=tpe.suggest,
-        max_evals=50,  
+        max_evals=10,  
         trials=trials
     )
 
@@ -440,6 +399,12 @@ best_params = space_eval(space, best)
 print(f"Best parameters: {best_params}")
 print(f"Best eval auc: {best_run['loss']}")
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Recreating and Logging the model
+# MAGIC ##### Once the model has been through the hyperopt pipeline, I rerun the model with the best parameters to easily find the model for logging
 
 # COMMAND ----------
 
@@ -456,7 +421,7 @@ auc_roc = -1*model['loss']
 # COMMAND ----------
 
 # Define the model name for the registry
-registry_model_name = "bluecrew.ml.Overfill_Test"
+registry_model_name = "bluecrew.ml.overfill_test"
 
 client = MlflowClient()
 client.delete_registered_model(name=registry_model_name)
@@ -465,6 +430,11 @@ latest_experiment = find_latest_experiment()
 best_run_id = find_best_run_id(latest_experiment, "metrics.training_roc_auc")
 model_details = register_run_as_model(registry_model_name, best_run_id)
 # update_model_stage(model_details, 'Staging')
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Sample code to show model loading
 
 # COMMAND ----------
 
@@ -519,6 +489,11 @@ df_test['prediction'] = model2.predict(df_test[[key for key in schema_dict]])
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Prediction analysis
+
+# COMMAND ----------
+
 df_test[['predicted_prob', 'Work']]
 
 # COMMAND ----------
@@ -560,7 +535,7 @@ sns.kdeplot(
 
 # COMMAND ----------
 
-sns.histplot(data=x2, x='predicted_probability', hue="Work",palette="crest",
+sns.histplot(data=x2, x='predicted_probability', hue="Work",palette="Spectral",
    alpha=.5, linewidth=0,bins=10, multiple='stack')
 plt.show()
 
@@ -595,12 +570,13 @@ print("  MAPE: %s" % mape)
 
 # COMMAND ----------
 
-feature_importance = FeatureImportance(final_model)
-feature_importance.plot(top_n_features=100)
+# MAGIC %md
+# MAGIC # Feature Importance Plot
 
 # COMMAND ----------
 
-
+feature_importance = FeatureImportance(final_model)
+feature_importance.plot(top_n_features=100)
 
 # COMMAND ----------
 
